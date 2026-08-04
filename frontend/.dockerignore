@@ -1,0 +1,36 @@
+# Dependencies (reinstalled inside the image)
+node_modules/
+
+# Build output (rebuilt inside the image)
+dist/
+build/
+
+# Secrets and local env
+.env
+.env.*
+
+# Git and editor
+.git/
+.gitignore
+.dockerignore
+.vscode/
+.idea/
+
+# Docker files (not needed in the runtime image)
+Dockerfile
+docker-compose*.yml
+compose*.yaml
+
+# Logs and debug
+*.log
+npm-debug.log*
+
+# Tests and coverage
+coverage/
+__tests__/
+*.test.js
+*.spec.js
+
+# Documentation (not needed at runtime)
+README.md
+*.md
