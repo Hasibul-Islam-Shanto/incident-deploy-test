@@ -112,14 +112,36 @@ jobs:
             export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
             export IMAGE_TAG="${{ github.sha }}"
 
-            docker compose -f compose.prod.yaml pull
-            docker compose -f compose.prod.yaml up -d --remove-orphans
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE="docker compose"
+            elif command -v docker-compose >/dev/null 2>&1; then
+              COMPOSE="docker-compose"
+            else
+              echo "ERROR: Docker Compose is not installed. Run: sudo apt install -y docker-compose-plugin"
+              exit 1
+            fi
+
+            set -a
+            source .env
+            set +a
+            FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+            BACKEND_PORT="${BACKEND_PORT:-5000}"
+
+            if ss -ltn 2>/dev/null | grep -q ":${FRONTEND_PORT} "; then
+              echo "ERROR: Port ${FRONTEND_PORT} is already in use on this EC2 host."
+              echo "Edit $APP_DIR/.env and set FRONTEND_PORT=3000 (or another free port)."
+              sudo ss -ltnp 2>/dev/null | grep ":${FRONTEND_PORT} " || true
+              exit 1
+            fi
+
+            $COMPOSE -f compose.prod.yaml pull
+            $COMPOSE -f compose.prod.yaml up -d --remove-orphans
 
             echo "Waiting for application to respond..."
             DEPLOY_OK=false
             for attempt in $(seq 1 24); do
-              if docker compose -f compose.prod.yaml exec -T backend wget -qO- http://127.0.0.1:5000/health 2>/dev/null | grep -q '"status":"healthy"'; then
-                if docker compose -f compose.prod.yaml exec -T frontend curl -sf http://127.0.0.1/ >/dev/null 2>&1; then
+              if $COMPOSE -f compose.prod.yaml exec -T backend wget -qO- http://127.0.0.1:5000/health 2>/dev/null | grep -q '"status":"healthy"'; then
+                if $COMPOSE -f compose.prod.yaml exec -T frontend curl -sf http://127.0.0.1/ >/dev/null 2>&1; then
                   DEPLOY_OK=true
                   echo "Deploy verified on attempt $attempt"
                   break
@@ -129,22 +151,22 @@ jobs:
               sleep 5
             done
 
-            docker compose -f compose.prod.yaml ps -a
+            $COMPOSE -f compose.prod.yaml ps -a
 
             if [ "$DEPLOY_OK" != "true" ]; then
               echo "=== Deploy verification failed ==="
-              for id in $(docker compose -f compose.prod.yaml ps -q); do
+              for id in $($COMPOSE -f compose.prod.yaml ps -q); do
                 name=$(docker inspect --format='{{.Name}}' "$id" | sed 's/^\///')
                 state=$(docker inspect --format='{{.State.Status}}' "$id")
                 health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "$id")
                 echo "$name -> state=$state health=$health"
               done
-              docker compose -f compose.prod.yaml logs --no-color --tail=100 database
-              docker compose -f compose.prod.yaml logs --no-color --tail=100 backend
-              docker compose -f compose.prod.yaml logs --no-color --tail=100 frontend
+              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 database
+              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 backend
+              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 frontend
               exit 1
             fi
 
             docker image prune -f
 
-            docker compose -f compose.prod.yaml ps
+            $COMPOSE -f compose.prod.yaml ps
