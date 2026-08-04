@@ -73,14 +73,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Copy compose file to EC2
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p deploy-bundle
+          cp compose.prod.yaml deploy-bundle/
+          cp scripts/ec2-deploy.sh deploy-bundle/
+
+      - name: Ensure deploy directory exists on EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo mkdir -p ${{ secrets.EC2_APP_PATH }}
+            sudo chown -R "$USER":"$USER" ${{ secrets.EC2_APP_PATH }}
+
+      - name: Copy deploy files to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: compose.prod.yaml
+          source: deploy-bundle/*
           target: ${{ secrets.EC2_APP_PATH }}
+          strip_components: 1
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -89,84 +106,5 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -euo pipefail
-
-            APP_DIR="${{ secrets.EC2_APP_PATH }}"
-            mkdir -p "$APP_DIR"
-            cd "$APP_DIR"
-
-            if [ ! -f compose.prod.yaml ]; then
-              echo "ERROR: compose.prod.yaml not found in $APP_DIR"
-              ls -la "$APP_DIR"
-              exit 1
-            fi
-
-            if [ ! -f .env ]; then
-              echo "ERROR: .env not found in $APP_DIR"
-              echo "Create it once on EC2 with POSTGRES_*, BACKEND_PORT, FRONTEND_PORT, DOCKERHUB_USERNAME"
-              exit 1
-            fi
-
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-            export DOCKERHUB_USERNAME="${{ secrets.DOCKERHUB_USERNAME }}"
-            export IMAGE_TAG="${{ github.sha }}"
-
-            if docker compose version >/dev/null 2>&1; then
-              COMPOSE="docker compose"
-            elif command -v docker-compose >/dev/null 2>&1; then
-              COMPOSE="docker-compose"
-            else
-              echo "ERROR: Docker Compose is not installed. Run: sudo apt install -y docker-compose-plugin"
-              exit 1
-            fi
-
-            set -a
-            source .env
-            set +a
-            FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-            BACKEND_PORT="${BACKEND_PORT:-5000}"
-
-            if ss -ltn 2>/dev/null | grep -q ":${FRONTEND_PORT} "; then
-              echo "ERROR: Port ${FRONTEND_PORT} is already in use on this EC2 host."
-              echo "Edit $APP_DIR/.env and set FRONTEND_PORT=3000 (or another free port)."
-              sudo ss -ltnp 2>/dev/null | grep ":${FRONTEND_PORT} " || true
-              exit 1
-            fi
-
-            $COMPOSE -f compose.prod.yaml pull
-            $COMPOSE -f compose.prod.yaml up -d --remove-orphans
-
-            echo "Waiting for application to respond..."
-            DEPLOY_OK=false
-            for attempt in $(seq 1 24); do
-              if $COMPOSE -f compose.prod.yaml exec -T backend wget -qO- http://127.0.0.1:5000/health 2>/dev/null | grep -q '"status":"healthy"'; then
-                if $COMPOSE -f compose.prod.yaml exec -T frontend curl -sf http://127.0.0.1/ >/dev/null 2>&1; then
-                  DEPLOY_OK=true
-                  echo "Deploy verified on attempt $attempt"
-                  break
-                fi
-              fi
-              echo "Attempt $attempt/24 — services not ready yet, waiting 5s..."
-              sleep 5
-            done
-
-            $COMPOSE -f compose.prod.yaml ps -a
-
-            if [ "$DEPLOY_OK" != "true" ]; then
-              echo "=== Deploy verification failed ==="
-              for id in $($COMPOSE -f compose.prod.yaml ps -q); do
-                name=$(docker inspect --format='{{.Name}}' "$id" | sed 's/^\///')
-                state=$(docker inspect --format='{{.State.Status}}' "$id")
-                health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "$id")
-                echo "$name -> state=$state health=$health"
-              done
-              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 database
-              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 backend
-              $COMPOSE -f compose.prod.yaml logs --no-color --tail=100 frontend
-              exit 1
-            fi
-
-            docker image prune -f
-
-            $COMPOSE -f compose.prod.yaml ps
+            chmod +x ${{ secrets.EC2_APP_PATH }}/ec2-deploy.sh
+            ${{ secrets.EC2_APP_PATH }}/ec2-deploy.sh ${{ github.sha }}
